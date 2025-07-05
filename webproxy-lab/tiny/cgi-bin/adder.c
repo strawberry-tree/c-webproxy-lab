@@ -30,6 +30,7 @@ int main(void)
   sprintf(content + strlen(content), "Thanks for visiting!\r\n");
 
   /* Generate the HTTP response */
+  printf("Connection ADDER: close\r\n");
   printf("Content-type: text/html\r\n");
   printf("Content-length: %d\r\n", (int)strlen(content));
   printf("\r\n");

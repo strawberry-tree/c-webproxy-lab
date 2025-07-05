@@ -26,7 +26,7 @@ int main(int argc, char **argv){
         // buf에 저장된 데이터를 서버로 송신. 송신 종료시까지 블로킹.
         Rio_writen(clientfd, buf, strlen(buf));
         // 서버에서 수신받은 데이터를 buf에 저장. 수신될 때까지 블로킹.
-        Rio_readlineb(&rio, buf, strlen(buf));
+        Rio_readlineb(&rio, buf, MAXLINE);
         // buf에 저장된 데이터를 출력.
         Fputs(buf, stdout);
     }
