@@ -11,9 +11,9 @@
 void doit(int fd);  // 한 개의 HTTP 트랜잭션을 처리한다.
 void read_requesthdrs(rio_t *rp); // 요청 헤더를 읽고 무시한다.
 int parse_uri(char *uri, char *filename, char *cgiargs);  // HTTP URI(접미어)를 분석한다.
-void serve_static(int fd, char *filename, int filesize);  // 정적 콘텐츠를 클라이언트에 서비스한다.
+void serve_static(int fd, char *filename, int filesize, int getflag);  // 정적 콘텐츠를 클라이언트에 서비스한다.
 void get_filetype(char *filename, char *filetype);
-void serve_dynamic(int fd, char *filename, char *cgiargs); // 동적 콘텐츠를 클라이언트에 서비스한다.
+void serve_dynamic(int fd, char *filename, char *cgiargs, int getflag); // 동적 콘텐츠를 클라이언트에 서비스한다.
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg); // 에러메시지를 클라이언트에게 보낸다.
 
 int main(int argc, char **argv)
@@ -90,7 +90,12 @@ void doit(int fd){
     sscanf(buf, "%s %s %s", method, uri, version);
 
     // 메서드가 GET이 아닌 경우, 구현되지 않았으니 에러를 클라이언트로 전달. 물론 구현을 해야겠지 나중에.
-    if (strcasecmp(method, "GET")) {
+    int getflag;
+    if (!strcasecmp(method, "GET")){
+      getflag = 1;
+    } else if (!strcasecmp(method, "HEAD")){
+      getflag = 0;
+    } else {
       clienterror(fd, method, "501", "Not implemented", "Tiny does not implement this method");
       return; // main 루틴으로 돌아감.
     }
@@ -118,7 +123,7 @@ void doit(int fd){
       }
       printf("Serve Static\n");
       // sbuf.st_size는 파일의 크기
-      serve_static(fd, filename, sbuf.st_size);
+      serve_static(fd, filename, sbuf.st_size, getflag);
     } else {  // 동적
       // 일반 파일이 아니거나 (딜게토리/소켓 등), 실행 권한이 없는 경우
       if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)){
@@ -126,7 +131,7 @@ void doit(int fd){
         return;
       }
       printf("Serve Dynamic\n");
-      serve_dynamic(fd, filename, cgiargs);
+      serve_dynamic(fd, filename, cgiargs, getflag);
     }
 }
 
@@ -219,7 +224,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs){
 
 // 정적 컨텐츠를 클라이언트에게 서비스
 // fd: 연결 소켓, filename: 파일명, filesize: 파일의 크기
-void serve_static(int fd, char *filename, int filesize){
+void serve_static(int fd, char *filename, int filesize, int getflag){
   int srcfd;  // 파일 명시자
   char *srcp, filetype[MAXLINE], buf[MAXBUF];
 
@@ -237,6 +242,9 @@ void serve_static(int fd, char *filename, int filesize){
   Rio_writen(fd, buf, strlen(buf));
   printf("Response headers:\n");
   printf("%s", buf);
+
+  // HEAD 요청인 경우 응답 본체를 보내지 않음
+  if (!getflag) return;
 
   // 응답 본체를 보냄
   // 읽기 전용(O_RDONLY)으로 파일을 열고, 파일 명시자를 반환
@@ -281,10 +289,10 @@ void get_filetype(char *filename, char *filetype){
 
 // 동적 콘텐츠 제공.
 // fd: 연결 식별자, filename: 파일명, cgiargs: cgi 프로그램에 보낼 인자
-void serve_dynamic(int fd, char *filename, char *cgiargs){
+void serve_dynamic(int fd, char *filename, char *cgiargs, int getflag){
   // buf: HTTP 응답 저장용 버퍼
   // emptylist: 인자를 저장할 리스트????
-  char buf[MAXLINE], *emptylist[] = {NULL};
+  char buf[MAXLINE], *arglist[] = {filename, getflag ? "1" : "0", NULL};
 
   // HTTP 응답 반환
   sprintf(buf, "HTTP/1.0 200 OK\r\n");
@@ -292,12 +300,15 @@ void serve_dynamic(int fd, char *filename, char *cgiargs){
   sprintf(buf, "Server: Tiny Web Server\r\n");
   Rio_writen(fd, buf, strlen(buf));
 
+  
+
   // 자녀 프로세스 생성. 자녀는 fork호출 직후부터 실행됨.
   if (Fork() == 0){
     // QUERY_STRING (CGI 환경변수) 를 cgiargs로 설정.
     // 1: 기존 환경 변수가 있어도 덮어쓴다는 뜻.
     // 실제 서버는 여기서 다른 환경변수도 설정함.
     setenv("QUERY_STRING", cgiargs, 1);
+    
 
     // 자식의 표준 출력을, 연결 파일 식별자로 재지정
     Dup2(fd, STDOUT_FILENO);
@@ -305,7 +316,7 @@ void serve_dynamic(int fd, char *filename, char *cgiargs){
     // 인자리스트 emptylist, 환경변수리스트 environ
     // environ은 전역 변수로, 운영체제가 프로그램 실행 시에 만들어 주는 환경 변수 리스트
     // filename을 실행
-    Execve(filename, emptylist, environ);
+    Execve(filename, arglist, environ);
   }
 
   Wait(NULL); // 부모 프로세스는 대기 -> 자식 프로세스 청소

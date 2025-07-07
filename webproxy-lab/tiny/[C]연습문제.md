@@ -82,4 +82,133 @@ Free(srcp);                       // 메모리 할당해제
 ![alt text](image-1.png)
 
 # 11.11
-- Tiny를 확장하여 HTTP HEAD 메소드를 지원하도록 
+- Tiny를 확장하여 HTTP HEAD 메소드를 지원하도록 하라. Telnet을 웹 클라이언트로 사용해서 작업 결과를 체크하시오.
+
+```c
+// doit 함수
+int getflag;
+if (!strcasecmp(method, "GET")){
+    getflag = 1;
+} else if (!strcasecmp(method, "HEAD")){
+    getflag = 0;
+} else {
+    clienterror(fd, method, "501", "Not implemented", "Tiny does not implement this method");
+    return; // main 루틴으로 돌아감.
+}
+
+// 생략
+serve_static(fd, filename, sbuf.st_size, getflag);
+
+// 생략
+serve_dynamic(fd, filename, cgiargs, getflag);
+```
+- `doit` 함수 내 `getflag` 변수를 선언
+- 메서드가 `GET`이면 `1`, `HEAD`면 `0`으로 설정
+- 이후 `getflag`를 `serve_static`, `serve_dynamic`에 매개변수로 추가 전송
+
+```c
+void serve_static(int fd, char *filename, int filesize, int getflag){
+// 생략
+  // 응답 헤더를 보냄
+  Rio_writen(fd, buf, strlen(buf));
+  printf("Response headers:\n");
+  printf("%s", buf);
+
+  // HEAD 요청인 경우 응답 본체를 보내지 않음
+  if (!getflag) return;
+
+  // 응답 본체를 보내는 코드가 이어짐
+}
+```
+- `serve_static`: `getflag`가 `0`이면 응답 본체를 보내기 전에 `return`으로 함수 종료.
+
+```c
+void serve_dynamic(int fd, char *filename, char *cgiargs, int getflag){
+  char buf[MAXLINE], *arglist[] = {filename, getflag ? "1" : "0", NULL};
+
+  // 생략
+  if (Fork() == 0){
+    // 생략
+    Execve(filename, arglist, environ);
+  }
+  // 생략
+}
+```
+- `serve_dynamic`: `getflag`의 값을 `arglist`에 저장.
+
+```c
+int main(int argc, char** argv)
+{
+  // 생략
+  if (argc > 1){
+    getflag = atoi(argv[1]);
+  }
+
+  // 생략
+
+  if(getflag){
+    printf("%s", content);
+  }
+
+  // 생략
+}
+```
+- `cgi-bin/adder.c`: 함수에 `argc`, `argv` 설정
+- 이후 `arglist`의 값은 `argv`에 들어감
+  - 우리가 입력한 `getflag`는 `argv[1]`에 위치
+- 이후 `getflag`이 `1`일 때만 `content`를 출력
+
+## 실행결과
+```bash
+> telnet localhost 8000
+Trying ::1...
+Connection failed: Connection refused
+Trying 127.0.0.1...
+Connected to localhost.
+Escape character is '^]'.
+> HEAD / HTTP/1.0
+
+HTTP/1.0 200 OK
+Filename: ./home.html
+Server: Tiny Web Server
+Connection: close
+Content-length: 481
+Content-type: text/html
+```
+
+```bash
+> telnet localhost 8000
+Trying ::1...
+Connection failed: Connection refused
+Trying 127.0.0.1...
+Connected to localhost.
+Escape character is '^]'.
+>HEAD /sample.mp4 HTTP/1.0
+
+HTTP/1.0 200 OK
+Filename: ./sample.mp4
+Server: Tiny Web Server
+Connection: close
+Content-length: 6217126
+Content-type: video/mp4
+
+Connection closed by foreign host.
+```
+
+```bash
+> telnet localhost 8000
+Trying ::1...
+Connection failed: Connection refused
+Trying 127.0.0.1...
+Connected to localhost.
+Escape character is '^]'.
+>  HEAD /cgi-bin/adder?num1=15&num2=30 HTTP/1.0
+
+HTTP/1.0 200 OK
+Server: Tiny Web Server
+Connection ADDER: close
+Content-type: text/html
+Content-length: 133
+
+Connection closed by foreign host.
+```

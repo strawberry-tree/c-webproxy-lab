@@ -4,11 +4,19 @@
 /* $begin adder */
 #include "csapp.h"
 
-int main(void)
+int main(int argc, char** argv)
 {
   char *buf, *p;
   char arg1[MAXLINE], arg2[MAXLINE], content[MAXLINE];
   int n1 = 0, n2 = 0;
+  int getflag = 0;
+
+  // atoi: 문자열을 정수로. ascii to integer.
+  if (argc > 1){
+    getflag = atoi(argv[1]);
+  }
+  
+
 
   /* Extract the two arguments */
   if ((buf = getenv("QUERY_STRING")) != NULL)
@@ -29,12 +37,15 @@ int main(void)
           n1, n2, n1 + n2);
   sprintf(content + strlen(content), "Thanks for visiting!\r\n");
 
+
   /* Generate the HTTP response */
   printf("Connection ADDER: close\r\n");
   printf("Content-type: text/html\r\n");
   printf("Content-length: %d\r\n", (int)strlen(content));
   printf("\r\n");
-  printf("%s", content);
+  if(getflag){
+    printf("%s", content);
+  }
   fflush(stdout);
 
   exit(0);
