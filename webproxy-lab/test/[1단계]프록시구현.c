@@ -9,19 +9,19 @@
 static const char *user_agent_hdr =
     "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36\r\n";
 
-void *doit(void *vargp);
+void doit(int fd);
 void read_requesthdrs(rio_t *rp, char *write_buf, char *prefix);
 void parse_url(char *url, char *prefix, char *portNo, char *suffix);
-void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
+void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
+                 char *longmsg);
 
 
 int main(int argc, char **argv)
 {
-  int listenfd, *connfdp;
+  int listenfd, connfd;
   char hostname[MAXLINE], port[MAXLINE];
   socklen_t clientlen;
   struct sockaddr_storage clientaddr;
-  pthread_t tid;
 
   /* Check command line args */
   if (argc != 2)
@@ -34,25 +34,20 @@ int main(int argc, char **argv)
   while (1)
   {
     clientlen = sizeof(clientaddr);
-    connfdp = Malloc(sizeof(int));
-    *connfdp = Accept(listenfd, (SA *)&clientaddr,
+    connfd = Accept(listenfd, (SA *)&clientaddr,
                     &clientlen); // line:netp:tiny:accept
     Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
-    printf("(%d): Accepted connection from (%s, %s)\n", *connfdp, hostname, port);
-    Pthread_create(&tid, NULL, doit, connfdp);
-    // doit(connfd);  // line:netp:tiny:doit
-    // Close(connfd); // line:netp:tiny:close
+    printf("Accepted connection from (%s, %s)\n", hostname, port);
+    doit(connfd);  // line:netp:tiny:doit
+    Close(connfd); // line:netp:tiny:close
   }
 }
 
 /*
  * doit - handle one HTTP request/response transaction
  */
-void *doit(void *vargp)
+void doit(int fd)
 {
-  int fd = *((int *)vargp);
-  Pthread_detach(pthread_self());
-  free(vargp);
   int final_fd;     // 최종 서버로의 소켓식별자
   
   // 사용자 버퍼
@@ -68,18 +63,21 @@ void *doit(void *vargp)
   /* Read request line and headers */
   Rio_readinitb(&rio, fd);
   if (!Rio_readlineb(&rio, read_buf, MAXLINE))
-    return NULL;
+    return;
   printf("%s", read_buf);
   sscanf(read_buf, "%s %s %s", method, url, version);
   if (strcasecmp(method, "GET"))
   {
     clienterror(fd, method, "501", "Not Implemented",
                 "Proxy does not implement this method");
-    return NULL;
+    return;
   }
 
   /* Parse URL from GET request */
   parse_url(url, prefix, portNo, suffix);
+  
+  // 무엇을 보내야 할까?
+  char *p = write_buf;
 
   // [method] [suffix] HTTP/1.0 꼴로 보냄
   snprintf(write_buf, sizeof(write_buf), "%s %s HTTP/1.0\r\n", method, suffix);
@@ -96,7 +94,7 @@ void *doit(void *vargp)
   // 이제 우리가 요청을 보내야지
   Rio_writen(final_fd, write_buf, strlen(write_buf));
   printf("(%d) -> proxy -> (%d) 서버에 요청을 보냇어요.\n", fd, final_fd);
-  printf("%s", write_buf);
+  printf(write_buf);
 
   ssize_t n;
   // 그리고 서버에서 요청의 응답을 받으면, 클라이언트로 보낸다
@@ -106,8 +104,7 @@ void *doit(void *vargp)
   };
 
   Close(final_fd);
-  Close(fd);
-  return NULL;
+
 }
 
 /*
