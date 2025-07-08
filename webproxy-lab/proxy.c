@@ -9,11 +9,105 @@
 static const char *user_agent_hdr =
     "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36\r\n";
 
+struct _node {
+  char *prefix;                 // 호스트네임 (경로 매칭 용도)
+  char *portNo;                 // 포트번호 (경로 매칭 용도)
+  char *suffix;                 // URI (경로 매칭 용도)
+  char *data;                   // 캐시에 저장할 web object.
+  struct _node *prev;           // 이전 노드
+  struct _node *next;           // 다음 노드
+  ssize_t object_size;          // MAX_OBJECT_SIZE를 초과할 수 없음
+};
+
+typedef struct _node Node;
+
+typedef struct {
+  Node *head;          // 머리 노드
+  Node *tail;          // 꼬리 노드
+  ssize_t cache_size;   // MAX_CACHE_SIZE를 초과할 수 없음
+} Cache;
+
+// 캐시 (연결리스트) 선언
+Cache cache;
+  
+void insertNode(Node *);
+void removeNode(void);
 void *doit(void *vargp);
 void read_requesthdrs(rio_t *rp, char *write_buf, char *prefix);
 void parse_url(char *url, char *prefix, char *portNo, char *suffix);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
+Node *find_cache(char *prefix, char *portNo, char *suffix);
+void check_cache(void);
 
+// 캐시 맨 앞에 노드를 추가
+void insertNode(Node *_node){
+  if (_node == NULL) return; 
+  printf("노드 %p를 삽입합니다\n", _node);
+  cache.cache_size += _node -> object_size;
+  _node -> prev = NULL;
+  _node -> next = cache.head;
+
+  // 빈 리스트인 경우
+  if (cache.head == NULL){
+    cache.tail = _node;
+  }  else {
+    cache.head -> prev = _node;
+  }
+
+  cache.head = _node;
+  printf("헤드 노드가 %p로 바뀌었습니다\n", _node);
+  check_cache();
+}
+
+// 캐시 맨 뒤의 노드를 제거
+void removeNode(void){
+  if (cache.head == NULL || cache.tail == NULL) return; 
+
+  
+  Node *tailNode = cache.tail;
+  cache.cache_size -= tailNode -> object_size;
+
+
+  // 유일 노드가 제거되는 경우
+  if (tailNode == cache.head){
+    cache.head = NULL;
+    cache.tail = NULL;
+  } else {
+    cache.tail = tailNode -> prev;
+    (cache.tail) -> next = NULL;
+    
+  }
+  free(tailNode);
+  check_cache();
+}
+
+Node *find_cache(char *prefix, char *portNo, char *suffix){
+  if (cache.head == NULL || cache.tail == NULL){
+    printf("캐시에 저장된 데이터가 없습니다. 서버에 접근합니다.\n");
+    return NULL;
+  }
+  Node *curr;
+
+
+  // 버그 있는듯
+  for (curr = cache.head; curr != NULL; curr = curr -> next){
+    printf("현재: %s %s %s\n", prefix, portNo, suffix);
+    printf("캐시: %s %s %s\n", curr -> prefix, curr -> portNo, curr -> suffix);
+    if (!strcmp(curr -> prefix, prefix) && !strcmp(curr -> portNo, portNo) && !strcmp(curr -> suffix, suffix)){
+      printf("캐시에 저장된 데이터를 찾아서 바로 반환합니다.\n");
+      return curr;
+    }
+  }
+
+  printf("캐시에서 데이터를 찾지 못했습니다. 서버에 접근합니다.\n");
+  return NULL;
+}
+
+void check_cache(void){
+  for (Node *curr = cache.head; curr != NULL; curr = curr -> next){
+    printf("저장 노드 확인: %s %s %s\n", curr -> prefix, curr -> portNo, curr -> suffix);  
+  }
+}
 
 int main(int argc, char **argv)
 {
@@ -22,6 +116,12 @@ int main(int argc, char **argv)
   socklen_t clientlen;
   struct sockaddr_storage clientaddr;
   pthread_t tid;
+
+  // 캐시 초기화
+  cache.head = NULL;
+  cache.tail = NULL;
+  cache.cache_size = 0;
+  
 
   /* Check command line args */
   if (argc != 2)
@@ -56,7 +156,7 @@ void *doit(void *vargp)
   int final_fd;     // 최종 서버로의 소켓식별자
   
   // 사용자 버퍼
-  char read_buf[MAXLINE], write_buf[MAXLINE];
+  char read_buf[MAXLINE], write_buf[MAXLINE], cache_buf[MAX_OBJECT_SIZE];
   
   // 받은 request
   char method[MAXLINE], url[MAXLINE], version[MAXLINE];
@@ -88,6 +188,17 @@ void *doit(void *vargp)
   read_requesthdrs(&rio, write_buf, prefix);
   strcat(write_buf, "\r\n");
 
+  // 만약 이미 캐시에 저장되어 있다면, 이후 절차를 건너뛰고 바로 반환 가능
+  Node *cache_node;
+  if ((cache_node = (Node *)find_cache(prefix, portNo, suffix)) != NULL){
+   
+    // 여기서 클라이언트에 보내고 바로 리턴하면 됨.
+    printf("크기는 %d\n", cache_node -> object_size);
+    Rio_writen(fd, cache_node -> data, cache_node -> object_size);
+    Close(fd);
+    return NULL;
+  }
+
   // 보낼 서버와 연결된 소켓식별자를 반환
   // 별도의 rio 객체도 필요하다는 점, 기억하자!
   final_fd = Open_clientfd(prefix, portNo);
@@ -99,11 +210,36 @@ void *doit(void *vargp)
   printf("%s", write_buf);
 
   ssize_t n;
+  ssize_t buffer_size = 0;
+  int buffer_full = 0;
   // 그리고 서버에서 요청의 응답을 받으면, 클라이언트로 보낸다
   // 중간에 짤리니까 이거 해결해야 함.
   while ((n = Rio_readnb(&final_rio, read_buf, MAXLINE)) != 0){
     Rio_writen(fd, read_buf, n);
+    if (buffer_size + n <= MAX_OBJECT_SIZE){
+      memcpy(cache_buf, read_buf, n);
+      buffer_size += n;
+    } else {
+      buffer_full = 1;
+    }
   };
+
+  if(!buffer_full){
+    // 공간 부족 시 먼저 캐싱된 애들 제거
+    while (n + cache.cache_size > MAX_CACHE_SIZE ){
+        removeNode();
+    }
+
+    Node *cacheNode = Malloc(sizeof(Node));
+
+    cacheNode -> prefix = strdup(prefix);
+    cacheNode -> portNo = strdup(portNo);
+    cacheNode -> suffix = strdup(suffix);
+    cacheNode -> data = strdup(cache_buf);
+    // 연결리스트 삽입 함수
+    cacheNode -> object_size = buffer_size;
+    insertNode(cacheNode);
+  }
 
   Close(final_fd);
   Close(fd);
