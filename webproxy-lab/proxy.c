@@ -19,6 +19,11 @@ struct _node {
   ssize_t object_size;          // MAX_OBJECT_SIZE를 초과할 수 없음
 };
 
+// semaphore 사용 위함
+int read_count = 0;
+sem_t mutex, w;
+
+
 typedef struct _node Node;
 
 typedef struct {
@@ -37,10 +42,10 @@ void read_requesthdrs(rio_t *rp, char *write_buf, char *prefix);
 void parse_url(char *url, char *prefix, char *portNo, char *suffix);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
 Node *find_cache(char *prefix, char *portNo, char *suffix);
-void check_cache(void);
 
-// 캐시 맨 앞에 노드를 추가
+// 캐시 맨 앞에 노드를 추가 (Writer)
 void insertNode(Node *_node){
+  P(&w);
   if (_node == NULL) return; 
   printf("노드 %p를 삽입합니다\n", _node);
   cache.cache_size += _node -> object_size;
@@ -56,11 +61,12 @@ void insertNode(Node *_node){
 
   cache.head = _node;
   printf("헤드 노드가 %p로 바뀌었습니다\n", _node);
-  check_cache();
+  V(&w);
 }
 
-// 캐시 맨 뒤의 노드를 제거
+// 캐시 맨 뒤의 노드를 제거 (Writer)
 void removeNode(void){
+  P(&w);
   if (cache.head == NULL || cache.tail == NULL) return; 
 
   
@@ -77,36 +83,39 @@ void removeNode(void){
     (cache.tail) -> next = NULL;
     
   }
+  free(tailNode -> prefix);
+  free(tailNode -> portNo);
+  free(tailNode -> suffix);
+  free(tailNode -> data);
   free(tailNode);
-  check_cache();
+  V(&w);
 }
 
+// 캐시에서 데이터찾기 (Reader)
 Node *find_cache(char *prefix, char *portNo, char *suffix){
-  if (cache.head == NULL || cache.tail == NULL){
-    printf("캐시에 저장된 데이터가 없습니다. 서버에 접근합니다.\n");
-    return NULL;
-  }
-  Node *curr;
+  P(&mutex);
+  read_count++;
+  if (read_count == 1)
+    P(&w);
+  V(&mutex);
 
+  Node *curr = NULL;
 
-  // 버그 있는듯
-  for (curr = cache.head; curr != NULL; curr = curr -> next){
-    printf("현재: %s %s %s\n", prefix, portNo, suffix);
-    printf("캐시: %s %s %s\n", curr -> prefix, curr -> portNo, curr -> suffix);
-    if (!strcmp(curr -> prefix, prefix) && !strcmp(curr -> portNo, portNo) && !strcmp(curr -> suffix, suffix)){
-      printf("캐시에 저장된 데이터를 찾아서 바로 반환합니다.\n");
-      return curr;
+  if (cache.head != NULL){
+    for (curr = cache.head; curr != NULL; curr = curr -> next){
+      if (!strcmp(curr -> prefix, prefix) && !strcmp(curr -> portNo, portNo) && !strcmp(curr -> suffix, suffix)){
+        break;
+      }
     }
   }
-
-  printf("캐시에서 데이터를 찾지 못했습니다. 서버에 접근합니다.\n");
-  return NULL;
-}
-
-void check_cache(void){
-  for (Node *curr = cache.head; curr != NULL; curr = curr -> next){
-    printf("저장 노드 확인: %s %s %s\n", curr -> prefix, curr -> portNo, curr -> suffix);  
-  }
+  
+  P(&mutex);
+  read_count--;
+  if (read_count == 0)
+    V(&w);
+  V(&mutex);
+  
+  return curr;
 }
 
 int main(int argc, char **argv)
@@ -121,6 +130,10 @@ int main(int argc, char **argv)
   cache.head = NULL;
   cache.tail = NULL;
   cache.cache_size = 0;
+
+  // 세마포어 초기화
+  Sem_init(&mutex, 0, 1);
+  Sem_init(&w, 0, 1);
   
 
   /* Check command line args */
@@ -175,6 +188,7 @@ void *doit(void *vargp)
   {
     clienterror(fd, method, "501", "Not Implemented",
                 "Proxy does not implement this method");
+    Close(fd);
     return NULL;
   }
 
@@ -217,7 +231,7 @@ void *doit(void *vargp)
   while ((n = Rio_readnb(&final_rio, read_buf, MAXLINE)) != 0){
     Rio_writen(fd, read_buf, n);
     if (buffer_size + n <= MAX_OBJECT_SIZE){
-      memcpy(cache_buf, read_buf, n);
+      memcpy(cache_buf + buffer_size, read_buf, n);
       buffer_size += n;
     } else {
       buffer_full = 1;
@@ -226,19 +240,20 @@ void *doit(void *vargp)
 
   if(!buffer_full){
     // 공간 부족 시 먼저 캐싱된 애들 제거
-    while (n + cache.cache_size > MAX_CACHE_SIZE ){
+    while (cache.cache_size + buffer_size > MAX_CACHE_SIZE ){
         removeNode();
     }
 
-    Node *cacheNode = Malloc(sizeof(Node));
+    Node *new_node = Malloc(sizeof(Node));
 
-    cacheNode -> prefix = strdup(prefix);
-    cacheNode -> portNo = strdup(portNo);
-    cacheNode -> suffix = strdup(suffix);
-    cacheNode -> data = strdup(cache_buf);
+    new_node -> prefix = strdup(prefix);
+    new_node -> portNo = strdup(portNo);
+    new_node -> suffix = strdup(suffix);
+    new_node -> data = Malloc(buffer_size);
+    memcpy(new_node -> data, cache_buf, buffer_size);
     // 연결리스트 삽입 함수
-    cacheNode -> object_size = buffer_size;
-    insertNode(cacheNode);
+    new_node -> object_size = buffer_size;
+    insertNode(new_node);
   }
 
   Close(final_fd);
@@ -265,10 +280,10 @@ void read_requesthdrs(rio_t *rp, char *write_buf, char *prefix)
     Rio_readlineb(rp, read_buf, MAXLINE);
 
     // 위에서 명시한 4개의 헤더는 무시한다.
-    if (strncmp(read_buf, "Host:", strlen("Host:")) ||
-        strncmp(read_buf, "User-Agent:", strlen("User-Agent:")) ||
-        strncmp(read_buf, "Connection:", strlen("Connection:")) ||
-        strncmp(read_buf, "Proxy-Connection:", strlen("Proxy-Connection"))){
+    if (!strncmp(read_buf, "Host:", strlen("Host:")) ||
+        !strncmp(read_buf, "User-Agent:", strlen("User-Agent:")) ||
+        !strncmp(read_buf, "Connection:", strlen("Connection:")) ||
+        !strncmp(read_buf, "Proxy-Connection:", strlen("Proxy-Connection"))){
           continue;
     }
 
