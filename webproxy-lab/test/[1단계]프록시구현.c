@@ -98,7 +98,6 @@ void doit(int fd)
 
   ssize_t n;
   // 그리고 서버에서 요청의 응답을 받으면, 클라이언트로 보낸다
-  // 중간에 짤리니까 이거 해결해야 함.
   while ((n = Rio_readnb(&final_rio, read_buf, MAXLINE)) != 0){
     Rio_writen(fd, read_buf, n);
   };
